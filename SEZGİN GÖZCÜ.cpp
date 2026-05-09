@@ -1,201 +1,239 @@
 /*
  * ======================================================================================
- * PROJE ADI: Sezgin Gözcü 
- * LİSANS: GNU GPL V3
- *  LİSANS BİLGİSİ İÇİN https://www.gnu.org/licenses/gplv3-the-program.tr.html ziyaret edin)
- * KATKIDA BULUNANLAR:
- * - BURAK YAKUB GÜÇER : Yazılım ve Devre 
- * - EMİR KAAN TOPAL   : Tasarım ve Afiş 
- * - ZEKİ DAMAK        : Devre
+ * PROJE ADI: SEZGİN GÖZCÜ - AKILLI REHBER VE ERİŞİLEBİLİRLİK SİSTEMİ
+ * VERSİYON: 2.1 (Gelişmiş Aktif Buzzer ve PWM Motor Senkronizasyonu)
+ * LİSANS: GNU GPL V3 (Genel Kamu Lisansı)
+ * LİSANS BİLGİSİ: https://www.gnu.org/licenses/gplv3-the-program.tr.html
  * 
- * AÇIKLAMA:
- * Bu kod, ultrasonik sensörden gelen verileri işleyerek nesne mesafesine göre
- * buzzer ve titreşim motorunun şiddetini PWM (Sinyal Genişlik Modülasyonu) ile
- * dinamik olarak değiştirir. Ayrıca hatalı okumaları önlemek için veri yumuşatma
- * algoritması içerir.
+ * GELİŞTİRİCİ EKİP / KATKIDA BULUNANLAR:
+ * - BURAK YAKUB GÜÇER : Yazılım ve Devre
+ * - EMİR KAAN TOPAL   : Tasarım ve Afiş
+ * - ZEKİ DAMAK        : Devre 
+ * 
+ * TEKNİK ÖZET:
+ * Bu yazılım, görme engelli bireylerin mobilite kabiliyetini artırmak amacıyla 
+ * tasarlanmıştır. HC-SR04 ultrasonik sensörü aracılığıyla 40kHz frekansında 
+ * ses dalgaları yayarak çevredeki engelleri tespit eder. Elde edilen veriler, 
+ * "Moving Average Filter" (Hareketli Ortalama Filtresi) algoritmasından geçirilerek 
+ * parazitlerden arındırılır. Aktif buzzer ünitesi "Kesikli Uyarı" (Intermittent Alert) 
+ * mantığıyla, titreşim motoru ise PWM şiddetiyle kullanıcıya mesafe bilgisi sağlar.
  * ======================================================================================
  */
 
-// --- PIN TANIMLAMALARI ---
-const int trigPin   = 9;  // Ultrasonik tetikleme pini
-const int echoPin   = 10; // Ultrasonik yankı pini
-const int buzzerPin = 11; // Buzzer (PWM destekli olmalı)
-const int motorPin  = 6;  // Titreşim Motoru (PWM destekli olmalı)
+// --- KÜTÜPHANE VE MAKRO TANIMLAMALARI ---
+// Standart Arduino kütüphaneleri kullanılmaktadır.
+#define SOUND_SPEED 0.0343 // Standart hava sıcaklığında ses hızı (cm/us)
 
-// --- PARAMETRELER VE SABİTLER ---
-const int MAX_DISTANCE = 100; // Maksimum algılama mesafesi (cm)
-const int MIN_DISTANCE = 5;   // Minimum güvenli mesafe (cm)
-const int ALERT_THRESHOLD = 40; // Uyarı vermeye başlama sınırı (cm)
+// --- DONANIM PİN YAPILANDIRMASI (PİNOUT) ---
+const int trigPin   = 9;   // Ultrasonik sensör tetikleme çıkışı
+const int echoPin   = 10;  // Ultrasonik sensör yankı girişi
+const int buzzerPin = 11;  // Aktif Buzzer (Dijital kontrol)
+const int motorPin  = 6;   // Titreşim Motoru (PWM Kontrolü - 490Hz)
 
-// --- DEĞİŞKENLER ---
-long  duration;
-int   distance;
-int   smoothDistance;
-int   feedbackIntensity;
+// --- SİSTEM PARAMETRELERİ VE SINIR DEĞERLER ---
+const int MAX_DISTANCE    = 120; // Algılama menzili (cm) - Üst limit
+const int MIN_DISTANCE    = 4;   // Güvenli durma mesafesi (cm) - Alt limit
+const int ALERT_THRESHOLD = 50;  // Geri bildirimin başlayacağı mesafe (cm)
 
-// Filtreleme için dizi (Daha kararlı sonuçlar için)
-const int numReadings = 5;
-int readings[numReadings];      
-int readIndex = 0;              
-int total = 0;                  
-int average = 0;                
+// --- FİLTRELEME VE VERİ İŞLEME DEĞİŞKENLERİ ---
+const int numReadings = 8;       // Filtre örneği sayısı (Daha fazla örnek = Daha kararlı veri)
+int readings[numReadings];       // Örneklerin tutulduğu dizi
+int readIndex = 0;               // Mevcut dizin göstergesi
+long total    = 0;               // Aritmetik ortalama için toplam
+int averageDistance = 0;         // Filtrelenmiş nihai mesafe
+
+// --- ZAMANLAMA VE DURUM YÖNETİMİ (NON-BLOCKING) ---
+unsigned long lastBuzzerMillis = 0; // Buzzer zamanlaması için milisaniye takibi
+bool buzzerState = false;           // Buzzer'ın mevcut durumu (Açık/Kapalı)
+int feedbackIntensity = 0;          // Motor için hesaplanan PWM değeri
 
 // --- FONKSİYON PROTOTİPLERİ ---
-void getSensorData();
+void initializeSystem();
+void getUltrasonicData();
 void processFeedback(int dist);
-void printDebugInfo();
-int smoothData(int newReading);
+int applyMovingAverage(int newReading);
+void logDiagnosticData();
+void performHardwareSelfTest();
 
 // ======================================================================================
-// SETUP: SİSTEM BAŞLATMA
+// SETUP: SİSTEMİN İLKELENDİRİLMESİ
 // ======================================================================================
 void setup() {
-    // Pin modlarını ayarla
+    initializeSystem();
+    performHardwareSelfTest();
+    
+    Serial.println(F(">>> SEZGIN GOZCU SISTEMI BASLATILDI <<<"));
+    Serial.println(F("Gelismiş Filtreleme ve Aktif Buzzer Kontrolü Aktif."));
+}
+
+// ======================================================================================
+// MAIN LOOP: ANA YÖNETİM DÖNGÜSÜ
+// ======================================================================================
+void loop() {
+    /* 
+     * İşlem Önceliği Sıralaması:
+     * 1. Sensörden ham verinin çekilmesi (I/O İşlemi)
+     * 2. Ham verinin gürültüden arındırılması (Sinyal İşleme)
+     * 3. Kullanıcı geri bildirimlerinin üretilmesi (Aktüatör Kontrolü)
+     * 4. Tanılama verilerinin iletilmesi (Hata Ayıklama)
+     */
+    
+    getUltrasonicData();
+    
+    // Geçici değişken 'distance' üzerinden filtreleme yapılır
+    extern int distance; 
+    averageDistance = applyMovingAverage(distance);
+
+    processFeedback(averageDistance);
+
+    logDiagnosticData();
+
+    // Not: Sistemin tepki süresini (Responsiveness) korumak için delay() kullanılmamıştır.
+}
+
+// ======================================================================================
+// FONKSİYON: DONANIM VE PİN AYARLARI
+// ======================================================================================
+void initializeSystem() {
     pinMode(trigPin, OUTPUT);
     pinMode(echoPin, INPUT);
     pinMode(buzzerPin, OUTPUT);
     pinMode(motorPin, OUTPUT);
 
-    // Seri haberleşmeyi başlat
+    // Seri haberleşme hızını 9600 Baud olarak ayarla
     Serial.begin(9600);
     
-    // Açılış testi (Sistemin çalıştığını belirtmek için kısa bir bip)
-    digitalWrite(buzzerPin, HIGH);
-    digitalWrite(motorPin, HIGH);
-    delay(200);
-    digitalWrite(buzzerPin, LOW);
-    digitalWrite(motorPin, LOW);
-    
-    // Filtre dizisini sıfırla
+    // Filtre dizisini temizle
     for (int i = 0; i < numReadings; i++) {
         readings[i] = 0;
     }
-
-    Serial.println("========================================");
-    Serial.println("   AKILLI BASTON SISTEMI AKTIF EDILDI   ");
-    Serial.println("========================================");
 }
 
 // ======================================================================================
-// MAIN LOOP: ANA DÖNGÜ
+// FONKSİYON: DONANIM ÖZ-TESTİ (SELF-TEST)
 // ======================================================================================
-void loop() {
-    // 1. Sensörden ham veriyi al
-    getSensorData();
-
-    // 2. Veriyi filtrele (Dalgalanmaları önlemek için)
-    smoothDistance = smoothData(distance);
-
-    // 3. Mesafeye göre geri bildirimi (Buzzer/Motor) hesapla ve uygula
-    processFeedback(smoothDistance);
-
-    // 4. Bilgisayara veri gönder (Hata ayıklama için)
-    printDebugInfo();
-
-    // Sistemin kararlılığı için kısa bir bekleme
-    delay(30); 
+void performHardwareSelfTest() {
+    // Açılışta kullanıcının sistemin hazır olduğunu anlaması için haptik ve sesli uyarı
+    digitalWrite(buzzerPin, HIGH);
+    analogWrite(motorPin, 150);
+    delay(150);
+    digitalWrite(buzzerPin, LOW);
+    analogWrite(motorPin, 0);
+    delay(100);
+    digitalWrite(buzzerPin, HIGH);
+    delay(150);
+    digitalWrite(buzzerPin, LOW);
 }
 
 // ======================================================================================
-// FONKSİYON: SENSÖR VERİ OKUMA
+// FONKSİYON: SENSÖR VERİ OKUMA VE HATA AYIKLAMA
 // ======================================================================================
-void getSensorData() {
-    // Tetikleme pinini temizle
+int distance; // Global mesafe değişkeni
+void getUltrasonicData() {
+    long duration;
+
+    // Trig pini düşükte olduğundan emin ol (Sinyal temizliği)
     digitalWrite(trigPin, LOW);
     delayMicroseconds(2);
 
-    // 10 mikrosaniye boyunca tetikle
+    // 10 mikrosaniyelik yüksek sinyal göndererek ses dalgasını başlat
     digitalWrite(trigPin, HIGH);
     delayMicroseconds(10);
     digitalWrite(trigPin, LOW);
 
-    // Yankı süresini oku
-    duration = pulseIn(echoPin, HIGH);
+    // Yankı süresini oku (Zaman aşımı: 25ms - Yaklaşık 4 metreye tekabül eder)
+    duration = pulseIn(echoPin, HIGH, 25000);
 
-    // Mesafeyi cm cinsinden hesapla
-    // Ses hızı: 340 m/s -> 0.034 cm/us
-    distance = duration * 0.034 / 2;
-
-    // Hatalı veya aşırı uzak okumaları sınırla
-    if (distance > MAX_DISTANCE || distance <= 0) {
-        distance = MAX_DISTANCE;
-    }
-}
-
-// ======================================================================================
-// FONKSİYON: GERİ BİLDİRİM İŞLEME (PWM KONTROLÜ)
-// ======================================================================================
-void processFeedback(int dist) {
-    /* 
-     * Mesafe 40 cm'den küçükse uyarı başlar.
-     * Yaklaştıkça (mesafe azaldıkça) şiddet (PWM) artar.
-     */
-    if (dist <= ALERT_THRESHOLD) {
-        
-        // Mesafe 40 ile 5 arasındaysa şiddeti 100 ile 255 arasında ölçeklendir
-        // dist: 40 -> intensity: 100
-        // dist: 5  -> intensity: 255
-        feedbackIntensity = map(dist, MIN_DISTANCE, ALERT_THRESHOLD, 255, 100);
-        
-        // Değerin PWM sınırları dışına çıkmadığından emin ol
-        feedbackIntensity = constrain(feedbackIntensity, 0, 255);
-
-        // Donanıma aktar
-        analogWrite(buzzerPin, feedbackIntensity);
-        analogWrite(motorPin, feedbackIntensity);
-        
+    // Mesafe hesabı: (Süre * Ses Hızı) / 2 (Gidiş-Dönüş olduğu için ikiye bölünür)
+    if (duration == 0) {
+        distance = MAX_DISTANCE; // Sinyal dönmezse engel yok kabul et
     } else {
-        // Güvenli mesafedeyse her şeyi kapat
-        analogWrite(buzzerPin, 0);
-        analogWrite(motorPin, 0);
-        feedbackIntensity = 0;
+        distance = duration * SOUND_SPEED / 2;
     }
+
+    // Mantıksal sınırlandırma (Saturasyon)
+    if (distance > MAX_DISTANCE) distance = MAX_DISTANCE;
+    if (distance < 0) distance = 0;
 }
 
 // ======================================================================================
-// FONKSİYON: VERİ YUMUŞATMA (MOVING AVERAGE FILTER)
+// FONKSİYON: HAREKETLİ ORTALAMA FİLTRESİ (MOVING AVERAGE FILTER)
 // ======================================================================================
-int smoothData(int newReading) {
-    // Eski toplamdan en eski veriyi çıkar
+int applyMovingAverage(int newReading) {
+    // En eski veriyi toplamdan çıkar
     total = total - readings[readIndex];
-    // Yeni veriyi oku
+    // Yeni veriyi diziye ekle
     readings[readIndex] = newReading;
-    // Toplama ekle
+    // Yeni veriyi toplama ekle
     total = total + readings[readIndex];
-    // İndeksi ilerlet
-    readIndex = readIndex + 1;
+    // Dizin ilerletme
+    readIndex++;
 
-    // Dizinin sonuna geldiysek başa dön
+    // Dairesel tampon (Circular Buffer) mantığı
     if (readIndex >= numReadings) {
         readIndex = 0;
     }
 
-    // Ortalamayı hesapla
-    average = total / numReadings;
-    return average;
+    // Ortalamayı döndür
+    return (int)(total / numReadings);
 }
 
 // ======================================================================================
-// FONKSİYON: SERİ PORT ÇIKTISI
+// FONKSİYON: GERİ BİLDİRİM STRATEJİSİ (AKTİF BUZZER VE PWM MOTOR)
 // ======================================================================================
-void printDebugInfo() {
-    Serial.print("Ham Mesafe: ");
-    Serial.print(distance);
-    Serial.print(" cm | ");
+void processFeedback(int dist) {
+    /*
+     * KRİTİK MANTIK:
+     * Engel 'ALERT_THRESHOLD' değerinden yakınsa sistem alarm moduna geçer.
+     * Mesafe azaldıkça:
+     * 1. Titreşim motoru şiddeti (PWM) doğrusal olarak artar.
+     * 2. Aktif buzzer bip sıklığı (Frequency of Beeps) logaritmik olarak artar.
+     */
     
-    Serial.print("Filtrelenmiş: ");
-    Serial.print(smoothDistance);
-    Serial.print(" cm | ");
-    
-    Serial.print("Uyarı Şiddeti: %");
-    Serial.println(map(feedbackIntensity, 0, 255, 0, 100));
+    if (dist <= ALERT_THRESHOLD && dist > 0) {
+        
+        // 1. MOTOR KONTROLÜ (Haptik Geri Bildirim)
+        // Mesafe 50cm -> PWM 100 | Mesafe 4cm -> PWM 255
+        feedbackIntensity = map(dist, MIN_DISTANCE, ALERT_THRESHOLD, 255, 100);
+        feedbackIntensity = constrain(feedbackIntensity, 0, 255);
+        analogWrite(motorPin, feedbackIntensity);
+
+        // 2. AKTİF BUZZER KONTROLÜ (Sesli Geri Bildirim)
+        // Yaklaştıkça bekleme süresi (Delay) kısalır, ses hızlanır.
+        // 50cm'de 500ms aralık | 4cm'de 40ms aralık
+        int beepInterval = map(dist, MIN_DISTANCE, ALERT_THRESHOLD, 40, 500);
+        
+        if (millis() - lastBuzzerMillis >= beepInterval) {
+            lastBuzzerMillis = millis();
+            buzzerState = !buzzerState; // Durumu tersle (Toggle)
+            digitalWrite(buzzerPin, buzzerState);
+        }
+        
+    } else {
+        // Güvenli bölge: Tüm aktüatörleri durdur
+        digitalWrite(buzzerPin, LOW);
+        analogWrite(motorPin, 0);
+        feedbackIntensity = 0;
+        buzzerState = false;
+    }
 }
 
-/*
- * NOTLAR:
- * 1. Motor Pin (6) ve Buzzer Pin (11) Arduino Uno üzerinde ~ (Tilde) işaretli olmalıdır (PWM).
- * 2. Eğer buzzer pasif (passive) değilse analogWrite ile ton kontrolü yapılamaz, 
- *    bu durumda 'tone()' fonksiyonuna geçiş yapılmalıdır.
- * 3. Mesafe sınırları kullanıcının yürüyüş hızına göre ALERT_THRESHOLD kısmından ayarlanabilir.
- * 
- */
+// ======================================================================================
+// FONKSİYON: TELEMETRİ VE TANILAMA
+// ======================================================================================
+void logDiagnosticData() {
+    // Seri Plotter veya Seri Monitör için verileri düzenle
+    Serial.print(F("Mesafe:"));
+    Serial.print(averageDistance);
+    Serial.print(F("cm\t"));
+    
+    Serial.print(F("Motor_Gucu:%"));
+    Serial.print(map(feedbackIntensity, 0, 255, 0, 100));
+    Serial.print(F("\t"));
+
+    if (averageDistance <= ALERT_THRESHOLD) {
+        Serial.println(F("[TEHLIKE: ENGEL TESPIT EDILDI]"));
+    } else {
+        Serial.println(F("[YOL ACIK]"));
+    }
+}
